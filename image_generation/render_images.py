@@ -354,13 +354,23 @@ def render_scene(args,
   poses = utils.sample_poses(args.imgs_per_scene, 10)
 
   # Check visibility here and if one object not visible in either view then sample 2 new poses
-  for i in range(args.imgs_per_scene):
-    for j in range(4):
-      for k in range(4):
-        bpy.data.objects['Camera'].matrix_world[j][k] = poses[i][j, k]
-    all_visible = check_visibility(blender_objects, args.min_pixels_per_object)
-    print('all visible', all_visible)
-    break
+  # for i in range(args.imgs_per_scene):
+  #   for j in range(4):
+  #     for k in range(4):
+  #       bpy.data.objects['Camera'].matrix_world[j][k] = poses[i][j, k]
+  #   all_visible = check_visibility(blender_objects, args.min_pixels_per_object)
+  #   print('all visible', all_visible)
+  #   break
+
+  # Render object masks
+  # print(bpy.context.scene.view_layers.values())
+  bpy.context.scene.use_nodes = True
+  bpy.context.scene.view_layers["RenderLayer"].use_pass_object_index = True
+  for i, obj in enumerate(bpy.context.scene.objects):
+    obj.pass_index = i
+    # bpy.ops.node.add_node(type="CompositorNodeOutputFile", use_transform=True)
+    # bpy.data.scenes["Scene"].node_tree.nodes["File Output.00{}".format(i+1)].base_path = output_masks_dir
+  print(bpy.context.object.pass_index)
 
   # Render the scene and dump the scene data structure
   for i in range(args.imgs_per_scene):
@@ -380,7 +390,6 @@ def render_scene(args,
     if output_blendfile is not None:
       bpy.ops.wm.save_as_mainfile(filepath=output_blendfile)
 
-    break
 
   scene_struct['objects'] = objects
   scene_struct['relationships'] = compute_all_relationships(scene_struct)
