@@ -7,8 +7,8 @@
 
 import sys, random, os
 import bpy, bpy_extras
-
-
+import numpy as np
+from look_at import look_at
 """
 Some utility functions for interacting with Blender
 """
@@ -37,8 +37,14 @@ def parse_args(parser, argv=None):
 def delete_object(obj):
   """ Delete a specified blender object """
   for o in bpy.data.objects:
-    o.select = False
-  obj.select = True
+    if bpy.app.version <= (2, 79, 0):
+      o.select = False
+    else:
+      o.select_set(False)
+  if bpy.app.version <= (2, 79, 0):
+    obj.select = True
+  else:
+    obj.select_set(True)
   bpy.ops.object.delete()
 
 
@@ -100,7 +106,10 @@ def add_object(object_dir, name, scale, loc, theta=0):
 
   # Set the new object as active, then rotate, scale, and translate it
   x, y = loc
-  bpy.context.scene.objects.active = bpy.data.objects[new_name]
+  if bpy.app.version <= (2, 79, 0):
+    bpy.context.scene.objects.active = bpy.data.objects[new_name]
+  else: 
+    bpy.context.view_layer.objects.active = bpy.data.objects[new_name]
   bpy.context.object.rotation_euler[2] = theta
   bpy.ops.transform.resize(value=(scale, scale, scale))
   bpy.ops.transform.translate(value=(x, y, scale))
@@ -169,4 +178,23 @@ def add_material(name, **properties):
       group_node.outputs['Shader'],
       output_node.inputs['Surface'],
   )
+
+def sample_poses(n_poses, radius=7., centre=[0., 0., 0.]):
+  """ Sample poses from a upper part of hemisphere looking at the centre of the sphere. """
+
+  poses = []
+  for i in range(n_poses):
+    # sample points in hemisphere
+    phi = random.uniform(0, np.pi)
+    theta = random.uniform(0, 70 / 180 * np.pi)
+
+    loc = np.array([radius * np.sin(theta) * np.cos(phi), 
+                    radius * np.sin(theta) * np.sin(phi),
+                    radius * np.cos(theta)])
+
+    poses.append(np.matrix(look_at(loc, 
+                        centre, 
+                        np.array([0., 0., 1.]))))
+
+  return poses
 

@@ -4,12 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree. An additional grant
 # of patent rights can be found in the PATENTS file in the same directory.
-
 from __future__ import print_function
 import math, sys, random, argparse, json, os, tempfile
 from datetime import datetime as dt
 from collections import Counter
-
+import numpy as np
+import time
 """
 Renders random scenes using Blender, each with with a random number of objects;
 each object has a random size, position, color, and shape. Objects will be
@@ -74,7 +74,7 @@ parser.add_argument('--margin', default=0.4, type=float,
     help="Along all cardinal directions (left, right, front, back), all " +
          "objects will be at least this distance apart. This makes resolving " +
          "spatial relationships slightly less ambiguous.")
-parser.add_argument('--min_pixels_per_object', default=200, type=int,
+parser.add_argument('--min_pixels_per_object', default=500, type=int,
     help="All objects will have at least this many visible pixels in the " +
          "final rendered images; this ensures that no objects are fully " +
          "occluded by other objects.")
@@ -87,23 +87,25 @@ parser.add_argument('--start_idx', default=0, type=int,
     help="The index at which to start for numbering rendered images. Setting " +
          "this to non-zero values allows you to distribute rendering across " +
          "multiple machines and recombine the results later.")
-parser.add_argument('--num_images', default=5, type=int,
-    help="The number of images to render")
+parser.add_argument('--num_scenes', default=5, type=int,
+    help="The number of scenes to render")
+parser.add_argument('--imgs_per_scene', default=2, type=int,
+    help="The number of different viewpoints to render a scene from")
 parser.add_argument('--filename_prefix', default='CLEVR',
     help="This prefix will be prepended to the rendered images and JSON scenes")
 parser.add_argument('--split', default='new',
     help="Name of the split for which we are rendering. This will be added to " +
          "the names of rendered images, and will also be stored in the JSON " +
          "scene structure for each image.")
-parser.add_argument('--output_image_dir', default='../output/images/',
+parser.add_argument('--output_image_dir', default='../manyviews/images/',
     help="The directory where output images will be stored. It will be " +
          "created if it does not exist.")
-parser.add_argument('--output_scene_dir', default='../output/scenes/',
+parser.add_argument('--output_scene_dir', default='../manyviews/scenes/',
     help="The directory where output JSON scene structures will be stored. " +
          "It will be created if it does not exist.")
-parser.add_argument('--output_scene_file', default='../output/CLEVR_scenes.json',
+parser.add_argument('--output_scene_file', default='../manyviews/CLEVR_scenes.json',
     help="Path to write a single JSON file containing all scene information")
-parser.add_argument('--output_blend_dir', default='output/blendfiles',
+parser.add_argument('--output_blend_dir', default='data/blendfiles',
     help="The directory where blender scene files will be stored, if the " +
          "user requested that these files be saved using the " +
          "--save_blendfiles flag; in this case it will be created if it does " +
@@ -127,9 +129,9 @@ parser.add_argument('--use_gpu', default=0, type=int,
     help="Setting --use_gpu 1 enables GPU-accelerated rendering using CUDA. " +
          "You must have an NVIDIA GPU with the CUDA toolkit installed for " +
          "to work.")
-parser.add_argument('--width', default=320, type=int,
+parser.add_argument('--width', default=640, type=int,
     help="The width (in pixels) for the rendered images")
-parser.add_argument('--height', default=240, type=int,
+parser.add_argument('--height', default=480, type=int,
     help="The height (in pixels) for the rendered images")
 parser.add_argument('--key_light_jitter', default=1.0, type=float,
     help="The magnitude of random jitter to add to the key light position.")
@@ -139,25 +141,28 @@ parser.add_argument('--back_light_jitter', default=1.0, type=float,
     help="The magnitude of random jitter to add to the back light position.")
 parser.add_argument('--camera_jitter', default=0.5, type=float,
     help="The magnitude of random jitter to add to the camera position")
-parser.add_argument('--render_num_samples', default=512, type=int,
+parser.add_argument('--render_num_samples', default=32, type=int,
     help="The number of samples to use when rendering. Larger values will " +
          "result in nicer images but will cause rendering to take longer.")
-parser.add_argument('--render_min_bounces', default=8, type=int,
+parser.add_argument('--render_min_bounces', default=0, type=int,
     help="The minimum number of bounces to use for rendering.")
-parser.add_argument('--render_max_bounces', default=8, type=int,
+parser.add_argument('--render_max_bounces', default=4, type=int,
     help="The maximum number of bounces to use for rendering.")
-parser.add_argument('--render_tile_size', default=256, type=int,
+parser.add_argument('--render_tile_size', default=128, type=int,
     help="The tile size to use for rendering. This should not affect the " +
          "quality of the rendered image but may affect the speed; CPU-based " +
          "rendering may achieve better performance using smaller tile sizes " +
          "while larger tile sizes may be optimal for GPU-based rendering.")
 
+# random.seed(0)
+
 def main(args):
-  num_digits = 6
+  num_digits = 3
   prefix = '%s_%s_' % (args.filename_prefix, args.split)
   img_template = '%s%%0%dd.png' % (prefix, num_digits)
-  scene_template = '%s%%0%dd.json' % (prefix, num_digits)
-  blend_template = '%s%%0%dd.blend' % (prefix, num_digits)
+  
+  scene_template = '%s%%0%dd.json' % (args.filename_prefix, num_digits)
+  blend_template = '%s%%0%dd.blend' % (args.filename_prefix, num_digits)
   img_template = os.path.join(args.output_image_dir, img_template)
   scene_template = os.path.join(args.output_scene_dir, scene_template)
   blend_template = os.path.join(args.output_blend_dir, blend_template)
@@ -170,9 +175,9 @@ def main(args):
     os.makedirs(args.output_blend_dir)
   
   all_scene_paths = []
-  for i in range(args.num_images):
+  for i in range(args.num_scenes):
     img_path = img_template % (i + args.start_idx)
-    scene_path = scene_template % (i + args.start_idx)
+    scene_path = args.output_scene_dir + 's{}.json'.format(i + args.start_idx)
     all_scene_paths.append(scene_path)
     blend_path = None
     if args.save_blendfiles == 1:
@@ -183,6 +188,7 @@ def main(args):
       output_index=(i + args.start_idx),
       output_split=args.split,
       output_image=img_path,
+      output_image_dir=args.output_image_dir,
       output_scene=scene_path,
       output_blendfile=blend_path,
     )
@@ -211,8 +217,9 @@ def render_scene(args,
     num_objects=5,
     output_index=0,
     output_split='none',
+    output_image_dir='../output/images/',
     output_image='render.png',
-    output_scene='render_json',
+    output_scene='render.json',
     output_blendfile=None,
   ):
 
@@ -235,11 +242,14 @@ def render_scene(args,
   render_args.tile_y = args.render_tile_size
   if args.use_gpu == 1:
     # Blender changed the API for enabling CUDA at some point
+    print(bpy.app.version)
     if bpy.app.version < (2, 78, 0):
       bpy.context.user_preferences.system.compute_device_type = 'CUDA'
       bpy.context.user_preferences.system.compute_device = 'CUDA_0'
     else:
-      cycles_prefs = bpy.context.user_preferences.addons['cycles'].preferences
+      print(bpy.context.preferences.addons['cycles'])
+      cycles_prefs = bpy.context.preferences.addons['cycles'].preferences
+      cuda_devices, opencl_devices = cycles_prefs.get_devices()
       cycles_prefs.compute_device_type = 'CUDA'
 
   # Some CYCLES-specific stuff
@@ -261,24 +271,52 @@ def render_scene(args,
   }
 
   # Put a plane on the ground so we can compute cardinal directions
-  bpy.ops.mesh.primitive_plane_add(radius=5)
+  if bpy.app.version <= (2, 79, 0):
+    bpy.ops.mesh.primitive_plane_add(radius=5)
+  else:
+    bpy.ops.mesh.primitive_plane_add(size=5)
+
   plane = bpy.context.object
 
   def rand(L):
     return 2.0 * L * (random.random() - 0.5)
 
   # Add random jitter to camera position
-  if args.camera_jitter > 0:
-    for i in range(3):
-      bpy.data.objects['Camera'].location[i] += rand(args.camera_jitter)
+  # if args.camera_jitter > 0:
+  #   for i in range(3):
+  #     bpy.data.objects['Camera'].location[i] += rand(args.camera_jitter)
+
 
   # Figure out the left, up, and behind directions along the plane and record
   # them in the scene structure
   camera = bpy.data.objects['Camera']
+
+  print('Camera location', camera.location)
+  print('Camera matrix world', camera.matrix_world)
+
   plane_normal = plane.data.vertices[0].normal
-  cam_behind = camera.matrix_world.to_quaternion() * Vector((0, 0, -1))
-  cam_left = camera.matrix_world.to_quaternion() * Vector((-1, 0, 0))
-  cam_up = camera.matrix_world.to_quaternion() * Vector((0, 1, 0))
+  if bpy.app.version <= (2, 79, 0):
+    cam_behind = camera.matrix_world.to_quaternion() * Vector((0, 0, -1))
+    cam_left = camera.matrix_world.to_quaternion() * Vector((-1, 0, 0))
+    cam_up = camera.matrix_world.to_quaternion() * Vector((0, 1, 0))
+  else:
+    cam_behind = camera.matrix_world.to_quaternion() @ Vector((0, 0, -1))
+    cam_left = camera.matrix_world.to_quaternion() @ Vector((-1, 0, 0))
+    cam_up = camera.matrix_world.to_quaternion() @ Vector((0, 1, 0))
+
+    # cam_behind = Vector((0, 0, 0))
+    # cam_behind[0] = - camera.matrix_world[0][2]
+    # cam_behind[1] = - camera.matrix_world[1][2]
+    # cam_behind[2] = - camera.matrix_world[2][2]
+    # cam_left = Vector((0, 0, 0))
+    # cam_left[0] = - camera.matrix_world[0][0]
+    # cam_left[1] = - camera.matrix_world[1][0]
+    # cam_left[2] = - camera.matrix_world[2][0]
+    # cam_up = Vector((0, 0, 0))
+    # cam_up[0] = camera.matrix_world[0][1]
+    # cam_up[1] = camera.matrix_world[1][1]
+    # cam_up[2] = camera.matrix_world[2][1]
+
   plane_behind = (cam_behind - cam_behind.project(plane_normal)).normalized()
   plane_left = (cam_left - cam_left.project(plane_normal)).normalized()
   plane_up = cam_up.project(plane_normal).normalized()
@@ -309,21 +347,46 @@ def render_scene(args,
   # Now make some random objects
   objects, blender_objects = add_random_objects(scene_struct, num_objects, args, camera)
 
+  # # Choose pose to render from
+  # centers = [obj['3d_coords'] for obj in objects]
+  # objects_centroid = np.mean(np.array(centers), axis=0)
+
+  poses = utils.sample_poses(args.imgs_per_scene, 10)
+
+  # Check visibility here and if one object not visible in either view then sample 2 new poses
+  for i in range(args.imgs_per_scene):
+    for j in range(4):
+      for k in range(4):
+        bpy.data.objects['Camera'].matrix_world[j][k] = poses[i][j, k]
+    all_visible = check_visibility(blender_objects, args.min_pixels_per_object)
+    print('all visible', all_visible)
+    break
+
   # Render the scene and dump the scene data structure
+  for i in range(args.imgs_per_scene):
+    render_args.filepath = output_image_dir + 's{}v{}.png'.format(output_index, i)
+
+    for j in range(4):
+      for k in range(4):
+        bpy.data.objects['Camera'].matrix_world[j][k] = poses[i][j, k]
+
+    while True:
+      try:
+        bpy.ops.render.render(write_still=True)
+        break
+      except Exception as e:
+        print(e)
+
+    if output_blendfile is not None:
+      bpy.ops.wm.save_as_mainfile(filepath=output_blendfile)
+
+    break
+
   scene_struct['objects'] = objects
   scene_struct['relationships'] = compute_all_relationships(scene_struct)
-  while True:
-    try:
-      bpy.ops.render.render(write_still=True)
-      break
-    except Exception as e:
-      print(e)
-
+  scene_struct['poses'] = [pose.tolist() for pose in poses]
   with open(output_scene, 'w') as f:
     json.dump(scene_struct, f, indent=2)
-
-  if output_blendfile is not None:
-    bpy.ops.wm.save_as_mainfile(filepath=output_blendfile)
 
 
 def add_random_objects(scene_struct, num_objects, args, camera):
@@ -366,8 +429,8 @@ def add_random_objects(scene_struct, num_objects, args, camera):
         for obj in blender_objects:
           utils.delete_object(obj)
         return add_random_objects(scene_struct, num_objects, args, camera)
-      x = random.uniform(-3, 3)
-      y = random.uniform(-3, 3)
+      x = random.uniform(-2, 2)
+      y = random.uniform(-2, 2)
       # Check to make sure the new object is further than min_dist from all
       # other objects, and further than margin along the four cardinal directions
       dists_good = True
@@ -393,10 +456,17 @@ def add_random_objects(scene_struct, num_objects, args, camera):
       if dists_good and margins_good:
         break
 
+    # print('object mapping', object_mapping)
+    # print('colours ', list(color_name_to_rgba.items()))
+
     # Choose random color and shape
     if shape_color_combos is None:
       obj_name, obj_name_out = random.choice(object_mapping)
       color_name, rgba = random.choice(list(color_name_to_rgba.items()))
+      # Fix colour and shape
+      # obj_name, obj_name_out = object_mapping[0]
+      # color_name, rgba = list(color_name_to_rgba.items())[1]
+
     else:
       obj_name_out, color_choices = random.choice(shape_color_combos)
       color_name = random.choice(color_choices)
@@ -432,15 +502,15 @@ def add_random_objects(scene_struct, num_objects, args, camera):
       'color': color_name,
     })
 
-  # Check that all objects are at least partially visible in the rendered image
-  all_visible = check_visibility(blender_objects, args.min_pixels_per_object)
-  if not all_visible:
-    # If any of the objects are fully occluded then start over; delete all
-    # objects from the scene and place them all again.
-    print('Some objects are occluded; replacing objects')
-    for obj in blender_objects:
-      utils.delete_object(obj)
-    return add_random_objects(scene_struct, num_objects, args, camera)
+  # # Check that all objects are at least partially visible in the rendered image
+  # all_visible = check_visibility(blender_objects, args.min_pixels_per_object)
+  # if not all_visible:
+  #   # If any of the objects are fully occluded then start over; delete all
+  #   # objects from the scene and place them all again.
+  #   print('Some objects are occluded; replacing objects')
+  #   for obj in blender_objects:
+  #     utils.delete_object(obj)
+  #   return add_random_objects(scene_struct, num_objects, args, camera)
 
   return objects, blender_objects
 
@@ -484,19 +554,21 @@ def check_visibility(blender_objects, min_pixels_per_object):
   Returns True if all objects are visible and False otherwise.
   """
   f, path = tempfile.mkstemp(suffix='.png')
+  path = 'flat.png'
   object_colors = render_shadeless(blender_objects, path=path)
   img = bpy.data.images.load(path)
   p = list(img.pixels)
   color_count = Counter((p[i], p[i+1], p[i+2], p[i+3])
                         for i in range(0, len(p), 4))
-  os.remove(path)
+  # os.remove(path)
+  print('\ncolor count', color_count)
   if len(color_count) != len(blender_objects) + 1:
     return False
   for _, count in color_count.most_common():
+    print('number of pixels for an object', count, min_pixels_per_object)
     if count < min_pixels_per_object:
       return False
   return True
-
 
 def render_shadeless(blender_objects, path='flat.png'):
   """
@@ -510,18 +582,51 @@ def render_shadeless(blender_objects, path='flat.png'):
   # Cache the render args we are about to clobber
   old_filepath = render_args.filepath
   old_engine = render_args.engine
-  old_use_antialiasing = render_args.use_antialiasing
+  if bpy.app.version <= (2, 79, 0):
+    old_use_antialiasing = render_args.use_antialiasing
+  old_view_transform = bpy.context.scene.view_settings.view_transform
 
   # Override some render settings to have flat shading
   render_args.filepath = path
-  render_args.engine = 'BLENDER_RENDER'
-  render_args.use_antialiasing = False
+  if bpy.app.version <= (2, 79, 0):
+    render_args.engine = 'BLENDER_RENDER'  # default rendering engine
+    render_args.use_antialiasing = False
+  else:   
+    render_args.engine = 'BLENDER_EEVEE'  # default rendering engine
 
   # Move the lights and ground to layer 2 so they don't render
-  utils.set_layer(bpy.data.objects['Lamp_Key'], 2)
-  utils.set_layer(bpy.data.objects['Lamp_Fill'], 2)
-  utils.set_layer(bpy.data.objects['Lamp_Back'], 2)
-  utils.set_layer(bpy.data.objects['Ground'], 2)
+  if bpy.app.version <= (2, 79, 0):
+    utils.set_layer(bpy.data.objects['Lamp_Key'], 2)
+    utils.set_layer(bpy.data.objects['Lamp_Fill'], 2)
+    utils.set_layer(bpy.data.objects['Lamp_Back'], 2)
+    utils.set_layer(bpy.data.objects['Ground'], 2)
+  else:
+    # coll = bpy.data.collections.new("Collection")
+    # bpy.context.scene.collection.children.link(coll)
+    # print(bpy.data.objects.keys())
+    # coll.objects.link(bpy.data.objects['Plane'])
+    # coll.objects.link(bpy.data.objects['Lamp_Fill'])
+    # coll.objects.link(bpy.data.objects['Lamp_Key'])
+    # coll.objects.link(bpy.data.objects['Lamp_Back'])
+    
+    # bpy.context.window.view_layer.layer_collection.children["Collection"].exclude = True
+    # # Update view layer
+    # layer = bpy.context.view_layer
+    # layer.update()
+
+    bpy.context.scene.objects['Plane'].hide_render = True
+    bpy.context.scene.objects['Lamp_Fill'].hide_render = True
+    bpy.context.scene.objects['Lamp_Key'].hide_render = True
+    bpy.context.scene.objects['Lamp_Back'].hide_render = True
+
+    # v1 = bpy.context.scene.view_layers.new(name="Lights layer")
+    # v1.active_layer_collection(coll)
+    # bpy.context.window.view_layer = v1
+
+    # # bpy.data.objects['Plane'].hide_set(False)
+    # # bpy.data.objects['Lamp_Key'].hide_set(False)
+    # # bpy.data.objects['Lamp_Fill'].hide_set(False)
+    # # bpy.data.objects['Lamp_Back'].hide_set(False)
 
   # Add random shadeless materials to all objects
   object_colors = set()
@@ -535,8 +640,20 @@ def render_shadeless(blender_objects, path='flat.png'):
       r, g, b = [random.random() for _ in range(3)]
       if (r, g, b) not in object_colors: break
     object_colors.add((r, g, b))
-    mat.diffuse_color = [r, g, b]
-    mat.use_shadeless = True
+    if bpy.app.version <= (2, 79, 0):
+      mat.use_shadeless = True
+      mat.diffuse_color = [r, g, b]
+    else: 
+      mat.use_nodes = True
+      mat.node_tree.nodes.remove(mat.node_tree.nodes.get('Principled BSDF'))  # Remove default node
+      material_output = mat.node_tree.nodes.get('Material Output')
+      emission = mat.node_tree.nodes.new('ShaderNodeEmission')
+      emission.inputs['Strength'].default_value = 1
+      emission.inputs['Color'].default_value = [r, g, b, 1.]
+      print(r,g,b)
+      mat.node_tree.links.new(material_output.inputs[0], emission.outputs[0])
+      obj.active_material = mat
+      bpy.context.scene.view_settings.view_transform = 'Standard'
     obj.data.materials[0] = mat
 
   # Render the scene
@@ -545,17 +662,27 @@ def render_shadeless(blender_objects, path='flat.png'):
   # Undo the above; first restore the materials to objects
   for mat, obj in zip(old_materials, blender_objects):
     obj.data.materials[0] = mat
+    obj.active_material = mat
 
   # Move the lights and ground back to layer 0
-  utils.set_layer(bpy.data.objects['Lamp_Key'], 0)
-  utils.set_layer(bpy.data.objects['Lamp_Fill'], 0)
-  utils.set_layer(bpy.data.objects['Lamp_Back'], 0)
-  utils.set_layer(bpy.data.objects['Ground'], 0)
+  if bpy.app.version <= (2, 79, 0):
+    utils.set_layer(bpy.data.objects['Lamp_Key'], 0)
+    utils.set_layer(bpy.data.objects['Lamp_Fill'], 0)
+    utils.set_layer(bpy.data.objects['Lamp_Back'], 0)
+    utils.set_layer(bpy.data.objects['Ground'], 0)
+  else:
+    bpy.context.scene.objects['Plane'].hide_render = False
+    bpy.context.scene.objects['Lamp_Fill'].hide_render = False
+    bpy.context.scene.objects['Lamp_Key'].hide_render = False
+    bpy.context.scene.objects['Lamp_Back'].hide_render = False
+
+    bpy.context.scene.view_settings.view_transform = old_view_transform
 
   # Set the render settings back to what they were
   render_args.filepath = old_filepath
   render_args.engine = old_engine
-  render_args.use_antialiasing = old_use_antialiasing
+  if bpy.app.version <= (2, 79, 0):
+    render_args.use_antialiasing = old_use_antialiasing
 
   return object_colors
 
